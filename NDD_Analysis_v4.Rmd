@@ -1,0 +1,256 @@
+---
+title: "NDD Analysis : Version 4"
+author:
+- name: Shannon E. Ellis
+  affiliation: Johns Hopkins Bloomberg School of Public Health
+  email: sellis18@jhmi.edu
+output:
+  BiocStyle::html_document:
+      code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(knitr)
+library(reshape2)
+library(tidyr)
+library(gplots)
+library(RColorBrewer)
+library(kableExtra)
+library(janitor)
+library(plotly)
+#devtools::install_github("Displayr/flipCluster")
+library(flipCluster)
+library(cluster)
+```
+
+# Data
+
+To begin the analysis, I first just read in the tidy NDD data we were sent. 
+
+```{r data, warning=FALSE}
+## read data in
+df <- readxl::read_excel("NDD_Tidy_v4.xlsx")
+```
+
+# Measurement Differences By Diagnosis
+
+To detect differences between groups, we first defined whether or not a sample was healthy or diseased, disregarding which disease the same was. Then, to display differences between groups, I split the data up by which measurement was taken. Below, we visually see the differences between healthy and disease groups for each measurement. Visually, the plots display the most obvious differenc between groups with the TEER measurement.
+
+## Plot
+```{r plots, warning=FALSE, message=FALSE, fig.width=11, fig.height=9}
+## create disease vector
+df <- df %>% 
+  mutate(dx = ifelse(Disease=="Healthy","Healthy","Disease"))
+
+## take a look at Values within Measurement plot
+ggplot(aes(x=dx,y=Value),data=df) +
+  geom_jitter(colour="gray48") +
+  geom_violin(alpha=0.4) +
+  facet_wrap(~ Measurement, scales="free_y") +
+  theme(axis.text=element_text(size=16),
+        axis.title=element_text(size=18),strip.text = element_text(size=16)) +
+  labs(x="")
+```
+
+## Analysis
+
+To formalize this analysis, we run a t-test for each measurement between groups. Below, the table is sorted by effect size (statistic). The mean value for each group is also included. The last two columns summarize significance, with the final column containing an adjusted p-value. This adjusts for the number of variables tested. 
+
+**Note**: this adjustment should potentially take into account the other variables initially tested. Happy to discuss this, if this is actually a table/value you end up presenting or making decisions based on.
+
+```{r t-test, warning=FALSE, message=FALSE, fig.width=10}
+## calculate t.test
+t_measurement <- function(x){
+  a <- df %>% filter(Measurement==x)
+  output <- t.test(Value ~ dx, data=a)
+  out = data.frame(statistic=output$statistic, 
+                   mean_dx = output$estimate[1], 
+                   mean_healthy = output$estimate[2], 
+                   p.value = output$p.value)
+  rownames(out) <- x
+  return(out)
+}
+
+## get output table
+measurements <- unique(df$Measurement)
+final = c()
+for(i in 1:length(measurements)){
+  b <- t_measurement(measurements[i])
+  final = rbind(final,b)
+}
+final <- final[order(abs(final$statistic),decreasing=TRUE),]
+final$p.value.adj = final$p.value*nrow(final)
+
+kable(final,digits=3) %>%
+  kable_styling()
+```
+
+## Cluster Analysis
+
+To better understand these data in aggregate, we'll carry out a cluster analysis. First, we'll visualize the data to determine if clustering makes sense, and then we'll carry out the clustering.
+
+## Cluster Visualization
+
+Here, for each replicate, we've compiled the measures taken for each sample. Each row was a different sample and then the columns included the values for each of the different measurements taken for that sample. These data were then plotted. These plot is interactive, so you can adjust the view of the axes and play around with the plot to see the differences between groups. 
+
+The three variables with significant differences by t-test were included for visualization: Dglucose, ER, and TEER.
+
+Only those samples with measurements for all three variables will be plotted. While only some of the data are plotted here, it becomes clear visually that, at least for these samples, the functional measurements differ between healthy and diseased cells.
+
+```{r scatter, warning=FALSE, message=FALSE}
+df_cluster <- df %>% 
+  mutate(Replicate = replace(Replicate, is.na(Replicate), 1)) %>% 
+  mutate(cell_line=`Cell line`) %>%
+  select(cell_line, Measurement,Value, Differentiation, Replicate,dx) %>%
+  melt(.,id.vars=c("cell_line","Measurement","Differentiation","Replicate", "dx")) %>%
+  mutate(identifier = paste(cell_line,Replicate,dx,sep=".")) %>%
+  mutate(id = paste(cell_line,Differentiation,dx,sep=".") ) %>% 
+  spread(.,key=Measurement,value=value,fill=NA) %>%
+  clean_names()
+
+p <- plot_ly(df_cluster, x = ~dglucose, y = ~er, z = ~teer, color = ~dx, colors = c('#BF382A', '#0C4B8E')) %>%
+  add_markers() %>%
+  layout(scene = list(xaxis = list(title = 'Dglucose'),
+                      yaxis = list(title = 'ER'),
+                      zaxis = list(title = 'TEER')))
+p
+
+```
+
+
+
+## Cluster Analysis
+
+Below, we run a cluster anlaysis, generating two clusters. Here, we'll be able to see if the healthy cells are separating out from the disease cells. 
+
+Additionally, here we report how many samples are in each cluster.
+
+```{r cluster, warning=FALSE, message=FALSE}
+dat <- df_cluster[,c(8:ncol(df_cluster))]
+nclust = 2
+clus <- KMeans(data = dat, centers = nclust)
+
+## plot K-Means summary
+table(clus$cluster)
+```
+
+```{r cluster-summary, warning=FALSE, message=FALSE}
+## make summary tables for below
+out_dx = cbind( round(t(table(clus$cluster,df_cluster$dx))/as.numeric(table(df_cluster$dx))*100,1),  N= as.numeric(table(df_cluster$dx)))
+
+out_sample = cbind( round(t(table(clus$cluster,df_cluster$id))/as.numeric(table(df_cluster$id))*100,1),  N= as.numeric(table(df_cluster$id)))
+
+out_cell_line = cbind( round(t(table(clus$cluster,df_cluster$cell_line))/as.numeric(table(df_cluster$cell_line))*100,1),  N= as.numeric(table(df_cluster$cell_line)))
+```
+
+### Clusters Plotted
+
+To visualize these data, we'll again look at those samples where complete data is available. In the plots below, the colors correspond to the **clusters**, *not* healthy vs. disease. Cluster 1 is in blue; Cluster 2 in orange. 
+
+```{r clusters, warning=FALSE, message=FALSE, fig.height=10, fig.width=10}
+# to look at clusters generated 
+ with(df_cluster, pairs(dat, col=c("blue", "orange")[clus$cluster], cex=2, pch=19, cex.axis=1.5)) 
+```
+
+
+A reminder, these plots only include the `r sum(complete.cases(df_cluster))` samples with values for all four measurements, so it should be interpreted with a grain of salt. However, the TEER measurements are generally  driving the clustering, with ER also separating out the two clusters fairly well.
+
+## Clustering by Diagnosis 
+
+By first glance we see that cluster 2 contains most of the healthy samples. Cluster 1 has a majority of the disease samples; however, there are a number of disease samples in Cluster 2. We'll investigate this further blow.
+
+Note, the numbers in these figures are percentages of each row in the respective cluster (sum in each row is 100%). The precie number of samples in each row that contributed to this percentage can be seen in the column 'N' in the table below the figure. Grey are lower numbers, white are the middle and red are the highest proportions.
+
+```{r, fig.height=6,fid.width=6}      
+# brewer.pal(8,"RdBu"))
+gplots::heatmap.2(x = out_dx[,1:nclust], Rowv = FALSE, Colv = FALSE, dendrogram = "none",
+          cellnote = out_dx, notecol = "black", notecex = 1.5,
+          trace = "none", key = TRUE, margins = c(7, 11),
+          col = colorRampPalette(c("gray48", "white", "red")),
+          cexRow=1.7, cexCol=1.7)
+
+kable(as.data.frame(out_dx),digits=2, "html") %>%
+ kable_styling()
+```
+
+## Clustering by Cell Line 
+
+Below, we'll try to understand which disease samples are clustering with the healthy samples. Here, we've allowed the rows to reorder based on their cluster proportion. So, we see that the healthy cell lines (BC1, iPS12, and WT2) are almost eclusively in Cluster 2; however, AD6 (which we know behaves more similarly to healthy cells) and SCNA1 are also predominantly in this cluster. For the disease cluster, SODA4V, JH033, and HD50 cluster almost exclusively with Cluster 1. There is more variability with SCNAT, AD10, and HD71.
+
+```{r, fig.height=8,fig.width=8}      
+
+gplots::heatmap.2(x = out_cell_line[,1:nclust], Colv = FALSE, Rowv = FALSE, dendrogram = 'none',
+          cellnote = out_cell_line, notecol = "black", notecex = 1.2,
+          trace = "none", key = TRUE, margins = c(7, 11), col = colorRampPalette(c("gray48", "white", "red")),cexRow=1.5, cexCol=1.5)
+
+kable(as.data.frame(out_cell_line),digits=2, "html") %>%
+   kable_styling() %>%
+    scroll_box(width = "100%", height = "200px")
+```           
+
+## Clustering by Sample (Replicates) 
+
+Finally, we've clustered by sample just in case we're interested in determining exactly which sample is driving the results we see above. Again, we've allowed the data to cluster by row, as seen in the dendrogram at left in the plot. This allows us to quickly see which cell lines/differentiations are not exclusively in one of the clusters. For example, we see at the bottom of the diagram that HD71.1, AD6.1, and SCNAT.2 are the cell lines with samples in both Cluster 1 and Cluster 2. (Note: the number after the decimal in the row ID "HD71.1" is the differentiation number.) 
+
+```{r, fig.height=13,fig.width=8}  
+col1 <- brewer.pal(11,"Paired")
+gplots::heatmap.2(x = out_sample[,1:nclust], Colv = FALSE, dendrogram = "row",
+          cellnote = out_sample, notecol = "black",
+          trace = "none", key = TRUE, margins = c(7, 11), col = colorRampPalette(c("gray48", "white", "red")), cexCol=1.5)
+
+          # RowSideColors=col1[as.numeric(mydf$category)])
+
+kable(as.data.frame(out_sample),digits=2, "html") %>%
+   kable_styling() %>%
+    scroll_box(width = "100%", height = "200px")
+```
+
+```{r, figures, echo=FALSE}      
+library(extrafont)
+
+## order heatmap
+order <- c("BC1", "WT2", "iPS12", "JH033","SODA4V", "SCNA1","SCNAT","AD6","AD10","HD50","HD71")
+out <- out_cell_line[,1:nclust]
+out <- out[order(match(rownames(out),order)),]
+
+pdf("plots/heatmap.pdf", family="Georgia", width=5, height=6)
+gplots::heatmap.2(x = out, 
+                  Colv = FALSE, Rowv = FALSE, dendrogram = 'none',
+                  cellnote = out, 
+                  notecol = "black", 
+                  notecex = 1.2,
+                  trace = "none", 
+                  key = TRUE, 
+                  margins = c(7, 11), 
+                  col = colorRampPalette(c("gray48", "white", "red")),
+                  cexRow=1.5, 
+                  cexCol=1.5,
+                  key.title = "",
+                  key.xlab = "Percentage",
+                  density.info=c("none"),
+                  lwd=4, 
+                  keysize = 0.5,
+                  srtCol=360, 
+                  adjCol = c(0.5,1),
+                  lmat=rbind( c(0, 3), c(2,1), c(0,4) ), lhei=c(0.7, 6, 2 ))
+#text(x, ...)
+
+dev.off()
+embed_fonts("plots/heatmap.pdf", outfile="plots/heatmap.pdf")
+```
+
+# Reproducibility {.unnumbered}
+
+```{r reproducibility}
+## Reproducibility information
+Sys.time()
+proc.time()
+options(width = 120)
+devtools::session_info()
+```
